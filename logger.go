@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"fmt"
 	"os"
 )
@@ -24,7 +25,7 @@ type FileTransactionLogger struct {
 	file         *os.File
 }
 
-func NewFileTransactionLogger(filename string) (TransactionLogger, error) {
+func NewFileTransactionLogger(filename string) (*FileTransactionLogger, error) {
 	file, err := os.OpenFile(filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open transaction log file: %w\n", err)
@@ -104,4 +105,118 @@ func (l *FileTransactionLogger) ReadEvents() (<-chan Event, <-chan error) {
 	}()
 
 	return outEvent, outError
+}
+
+type PostgresTransactionLogger struct {
+	events chan<- Event
+	errors <-chan error
+	db     *sql.DB
+}
+
+// TODO: add to config file
+type PostgresDBConfig struct {
+	host     string
+	dbName   string
+	user     string
+	password string
+}
+
+func NewPostgresTransactionLogger(cf PostgresDBConfig) (*PostgresTransactionLogger, error) {
+	connStr := fmt.Sprintf("host=%s dbname=%s user=%s password=%s", cf.host, cf.dbName, cf.user, cf.password)
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("connect to db failed: %w", err)
+	}
+
+	err = db.Ping()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open db connction: %w", err)
+	}
+
+	logger := &PostgresTransactionLogger{db: db}
+
+	// TODO: Add this 2 methods
+	//exists, err := logger.verifyTableExists()
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to verify table exists: %w", err)
+	//}
+
+	//if !exists {
+	//	if err = <-logger.createTable(); err != nil {
+	//		return nil, fmt.Errorf("failed to create table: %w", err)
+	//	}
+	//}
+
+	return logger, nil
+
+}
+
+func (p *PostgresTransactionLogger) WriteDelete(key string) {
+	p.events <- Event{EventType: EventDelete, Key: key}
+}
+
+func (p *PostgresTransactionLogger) WritePut(key string, value string) {
+	p.events <- Event{EventType: EventDelete, Key: key, Value: value}
+}
+
+func (p *PostgresTransactionLogger) Err() <-chan error {
+	return p.errors
+}
+
+func (p *PostgresTransactionLogger) ReadEvents() (<-chan Event, <-chan error) {
+	outEvent := make(chan Event)
+	outError := make(chan error, 1)
+
+	go func() {
+		var e Event
+		defer close(outEvent)
+		defer close(outError)
+
+		query := `SELECT sequence, event_type, key, value FROM transaction ORDER BY sequence`
+
+		// TODO: add context
+		rows, err := p.db.Query(query)
+		if err != nil {
+			outError <- fmt.Errorf("sql query error: %w", err)
+			return
+		}
+
+		defer rows.Close()
+
+		for rows.Next() {
+			err = rows.Scan(&e.Sequence, &e.EventType, &e.Key, &e.Value)
+			if err != nil {
+				outError <- fmt.Errorf("error reading row: %w", err)
+				return
+			}
+			outEvent <- e
+		}
+
+		err = rows.Err()
+		if err != nil {
+			outError <- fmt.Errorf("transaction log read failure: %w", err)
+			return
+		}
+	}()
+
+	return outEvent, outError
+}
+
+func (p *PostgresTransactionLogger) Run() {
+	events := make(chan Event, 16)
+	p.events = events
+
+	errors := make(chan error, 1)
+	p.errors = errors
+
+	go func() {
+		query := `INSER INTO transactions (evnet_type, key, value) VALUES ($1, $2, $3)`
+
+		for e := range events {
+			_, err := p.db.Exec(query, e.EventType, e.Key, e.Value)
+			if err != nil {
+				errors <- err
+			}
+		}
+	}()
 }
