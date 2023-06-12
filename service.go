@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -12,6 +13,8 @@ var (
 type store struct {
 	m map[string]string
 	l *sync.RWMutex
+
+	logger TransactionLogger
 }
 
 func New(l *sync.RWMutex) store {
@@ -47,4 +50,34 @@ func (s store) Delete(key string) error {
 	defer s.l.Unlock()
 
 	return nil
+}
+
+func (s store) initializeTransactionLog() error {
+	var err error
+
+	logger, err := NewFileTransactionLogger("transaction.log")
+	if err != nil {
+		return fmt.Errorf("failed to create event logger: %w", err)
+	}
+	s.logger = logger
+
+	events, errors := s.logger.ReadEvents()
+	e, ok := Event{}, true
+
+	for ok && err == nil {
+		select {
+		case err, ok = <-errors:
+		case e, ok = <-events:
+			switch e.EventType {
+			case EventDelete:
+				err = s.Delete(e.Key)
+			case EventPut:
+				err = s.Put(e.Key, e.Value)
+			}
+
+		}
+	}
+
+	s.logger.Run()
+	return err
 }

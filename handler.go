@@ -9,7 +9,8 @@ import (
 )
 
 type Handler struct {
-	store *store
+	store  *store
+	logger TransactionLogger
 }
 
 func NewHandler(s *store) Handler {
@@ -33,6 +34,7 @@ func (h Handler) keyValuePutHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.logger.WritePut(key, string(value))
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -53,4 +55,18 @@ func (h Handler) keyValueGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write([]byte(value))
+}
+
+func (h Handler) keyValueDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	key := vars["key"]
+
+	err := h.store.Delete(key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.logger.WriteDelete(key)
+
+	w.WriteHeader(http.StatusCreated)
 }
